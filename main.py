@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import iiif_prezi3
 import requests
@@ -26,7 +26,9 @@ class Series:
 class FileGroup:
     code: str
     title: str
+    date: str
     hasPart: list
+    uri: str = field(default_factory=str)
 
 
 @dataclass
@@ -36,6 +38,15 @@ class File:
     uri: str
     date: str
     metsid: str
+    hasPart: list
+
+
+@dataclass
+class Document:
+    code: str
+    title: str
+    uri: str
+    date: str
 
 
 def to_collection(
@@ -54,30 +65,34 @@ def to_collection(
 
     iiif_prezi3.config.configs["helpers.auto_fields.AutoLang"].auto_lang = language
 
-    collection = iiif_prezi3.Collection(
-        id=collection_id,
-        label=f"{i.code} - {i.title}",
-        metadata=[
-            iiif_prezi3.KeyValueString(
-                label="Identifier",
-                value={"en": [i.code]},
-            ),
-            iiif_prezi3.KeyValueString(
-                label="Title",
-                value={"en": [i.title]},
-            ),
+    collection = iiif_prezi3.Collection(id=collection_id, label=f"{i.code} - {i.title}")
+
+    metadata = [
+        iiif_prezi3.KeyValueString(
+            label="Identifier",
+            value={"en": [i.code]},
+        ),
+        iiif_prezi3.KeyValueString(
+            label="Title",
+            value={"en": [i.title]},
+        ),
+    ]
+
+    if i.uri:
+        metadata.append(
             iiif_prezi3.KeyValueString(
                 label="Permalink",
                 value={"en": [f'<a href="{i.uri}">{i.uri}</a>']},
-            ),
-        ],
-    )
+            )
+        )
 
     for c in i.hasPart:
         if isinstance(c, Series):
             collection.add_item(
                 to_collection(
-                    c, base_url, prefix=collection_filename.replace(".json", "/")
+                    c,
+                    base_url,
+                    prefix=collection_filename.replace(".json", "/"),
                 )
             )
         elif isinstance(c, FileGroup):
@@ -143,7 +158,6 @@ def to_manifest(
         # seeAlso={"id": i.uri, "label": "Permalink"},
         rights=license_uri,
     )
-
     scans = get_scans(i.metsid)
 
     for n, (file_name, iiif_service_info) in enumerate(scans, 1):
@@ -310,14 +324,23 @@ def get_series(series_el):
 
 def get_filegrp(filegrp_el):
     filegrp_code = filegrp_el.find("did/unitid").text
-    filegrp_title = "".join(filegrp_el.find("did/unittitle").itertext()).strip()
 
+    # Title
+    filegrp_title = "".join(filegrp_el.find("did/unittitle").itertext()).strip()
     while "  " in filegrp_title:  # double space
         filegrp_title = filegrp_title.replace("  ", " ")
+
+    # Date
+    date_el = filegrp_el.find("did/unitdate")
+    if date_el is not None:
+        date = date_el.attrib.get("normal", date_el.attrib.get("text"))
+    else:
+        date = ""
 
     filegrp = FileGroup(
         code=filegrp_code,
         title=filegrp_title,
+        date=date,
         hasPart=[],
     )
 
@@ -328,7 +351,7 @@ def get_filegrp(filegrp_el):
         if f:
             filegrp.hasPart.append(f)
 
-    return f
+    return filegrp
 
 
 def get_file(file_el):
@@ -369,6 +392,7 @@ def get_file(file_el):
         uri=permalink,
         date=date,
         metsid=metsid,
+        hasPart=[],
     )
 
     return f
