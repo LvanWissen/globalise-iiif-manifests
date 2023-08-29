@@ -56,7 +56,7 @@ def to_collection(
 
     collection = iiif_prezi3.Collection(
         id=collection_id,
-        label=i.code,
+        label=f"{i.code} - {i.title}",
         metadata=[
             iiif_prezi3.KeyValueString(
                 label="Identifier",
@@ -97,8 +97,6 @@ def to_collection(
                 )
             )
 
-        break
-
     with open(collection_filename, "w") as outfile:
         outfile.write(collection.json(indent=4))
 
@@ -123,7 +121,7 @@ def to_manifest(
 
     manifest = iiif_prezi3.Manifest(
         id=manifest_id,
-        label=i.code,
+        label=f"{i.code} - {i.title}",
         metadata=[
             iiif_prezi3.KeyValueString(
                 label="Identifier",
@@ -156,12 +154,6 @@ def to_manifest(
                 label=file_name,
                 anno_id=f"{manifest_id}/canvas/p{n}/anno",
                 anno_page_id=f"{manifest_id}/canvas/p{n}/annotationpage",
-                metadata=[
-                    iiif_prezi3.KeyValueString(
-                        label="Scan",
-                        value={"en": [file_name]},
-                    )
-                ],
             )
         else:
             canvas_id = f"{manifest_id}/canvas/p{n}"
@@ -213,15 +205,25 @@ def to_manifest(
     return manifest
 
 
-def get_scans(metsid):
+def get_scans(metsid, cache_path="data/gaf/"):
     NS = {"mets": "http://www.loc.gov/METS/"}
+
+    scans = []
 
     if metsid:
         url = "https://service.archief.nl/gaf/api/mets/v1/" + metsid
-        xml = requests.get(url).text
-        mets = ET.fromstring(bytes(xml, encoding="utf-8"))
 
-        scans = []
+        if cache_path and metsid + ".xml" in os.listdir(cache_path):
+            print(f"Fetching {url} from cache")
+            mets = ET.parse(os.path.join(cache_path, metsid + ".xml"))
+        else:
+            print("Fetching", url)
+            xml = requests.get(url).text
+            mets = ET.fromstring(bytes(xml, encoding="utf-8"))
+
+            if cache_path:
+                with open(os.path.join(cache_path, metsid + ".xml"), "w") as outfile:
+                    outfile.write(xml)
 
         for file_el in mets.findall(
             "mets:fileSec/mets:fileGrp[@USE='DISPLAY']/mets:file",
@@ -272,10 +274,11 @@ def parse_ead(ead_file_path: str):
 
 
 def get_series(series_el):
-    series_code = series_el.find("did/unitid[@type='series_code']")
+    series_code_el = series_el.find("did/unitid[@type='series_code']")
     series_title = "".join(series_el.find("did/unittitle").itertext()).strip()
-    if series_code is not None:
-        series_code = series_code.text
+    if series_code_el is not None:
+        series_code = series_code_el.text
+        series_code = series_code.replace("/", "")
     else:
         series_code = series_title
 
@@ -299,7 +302,8 @@ def get_series(series_el):
         else:
             continue
 
-        s.hasPart.append(i)
+        if i:
+            s.hasPart.append(i)
 
     return s
 
@@ -320,7 +324,9 @@ def get_filegrp(filegrp_el):
     file_els = filegrp_el.findall("c[@level='file']")
     for file_el in file_els:
         f = get_file(file_el)
-        filegrp.hasPart.append(f)
+
+        if f:
+            filegrp.hasPart.append(f)
 
     return f
 
@@ -333,7 +339,7 @@ def get_file(file_el):
     if inventorynumber_el is not None:
         inventorynumber = inventorynumber_el.text
     else:
-        inventorynumber = ""
+        return None
 
     # URI
     permalink = did.find("unitid[@type='handle']").text
