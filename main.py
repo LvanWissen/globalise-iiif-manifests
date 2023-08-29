@@ -111,6 +111,7 @@ def to_manifest(
     prefix="",
     license_uri="https://creativecommons.org/publicdomain/mark/1.0/",
     language="en",
+    fetch_from_url=False,
 ):
     manifest_filename = f"{prefix}{i.code}.json"
     manifest_filename = manifest_filename.replace(" ", "+")
@@ -147,20 +148,64 @@ def to_manifest(
 
     scans = get_scans(i.metsid)
 
-    for n, (file_name, iiif_service) in enumerate(scans, 1):
-        manifest.make_canvas_from_iiif(
-            url=iiif_service,
-            id=f"{manifest_id}/canvas/p{n}",
-            label=file_name,
-            anno_id=f"{manifest_id}/canvas/p{n}/anno",
-            anno_page_id=f"{manifest_id}/canvas/p{n}/annotationpage",
-            metadata=[
-                iiif_prezi3.KeyValueString(
-                    label="Scan",
-                    value={"en": [file_name]},
-                )
-            ],
-        )
+    for n, (file_name, iiif_service_info) in enumerate(scans, 1):
+        if fetch_from_url:
+            manifest.make_canvas_from_iiif(
+                url=iiif_service_info,
+                id=f"{manifest_id}/canvas/p{n}",
+                label=file_name,
+                anno_id=f"{manifest_id}/canvas/p{n}/anno",
+                anno_page_id=f"{manifest_id}/canvas/p{n}/annotationpage",
+                metadata=[
+                    iiif_prezi3.KeyValueString(
+                        label="Scan",
+                        value={"en": [file_name]},
+                    )
+                ],
+            )
+        else:
+            canvas_id = f"{manifest_id}/canvas/p{n}"
+
+            service_id = iiif_service_info.replace("/info.json", "")
+
+            anno_id = f"{manifest_id}/canvas/p{n}/anno"
+            anno_page_id = f"{manifest_id}/canvas/p{n}/annotationpage"
+
+            service = iiif_prezi3.ServiceItem1(
+                id=service_id,
+                profile="http://iiif.io/api/image/2/level1.json",
+                type="ImageService2",
+            )
+
+            body_id = f"{service_id}/full/full/0/default.jpg"
+            body = iiif_prezi3.ResourceItem(
+                id=body_id,
+                type="Image",
+                service=[service],
+                format="image/jpeg",
+                height=100,  # mock value for now
+                width=100,  # mock value for now
+            )
+
+            canvas = iiif_prezi3.Canvas(
+                id=canvas_id,
+                label=file_name,
+                height=100,  # mock value for now
+                width=100,  # mock value for now
+            )
+            annotation = iiif_prezi3.Annotation(
+                id=anno_id,
+                motivation="painting",
+                body=body,
+                target=canvas.id,
+            )
+
+            annotationPage = iiif_prezi3.AnnotationPage(id=anno_page_id)
+            annotationPage.add_item(annotation)
+
+            canvas.add_item(annotationPage)
+
+            manifest.add_item(canvas)
 
     with open(manifest_filename, "w") as outfile:
         outfile.write(manifest.json(indent=4))
@@ -183,10 +228,12 @@ def get_scans(metsid):
             namespaces=NS,
         ):
             file_id = file_el.attrib["ID"][:-3]  # without IIP
-            service_url = file_el.find(
+            service_info_url = file_el.find(
                 "./mets:FLocat[@LOCTYPE='URL']",
                 namespaces=NS,
             ).attrib["{http://www.w3.org/1999/xlink}href"]
+
+            service_info_url = service_info_url.replace("/iip/", "/iipsrv?IIIF=/")
 
             file_name = (
                 mets.find(
@@ -197,7 +244,7 @@ def get_scans(metsid):
                 .split("/")[-1]
             )
 
-            scans.append((file_name, service_url))
+            scans.append((file_name, service_info_url))
 
     return scans
 
@@ -340,7 +387,7 @@ def main(
 
     fonds = parse_ead(ead_file_path)
 
-    to_collection(fonds, base_url, "iiif/")
+    to_collection(fonds, base_url)
 
 
 if __name__ == "__main__":
