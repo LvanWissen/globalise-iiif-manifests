@@ -1,9 +1,12 @@
+import json
 import os
 from dataclasses import dataclass, field
 
 import iiif_prezi3
 import requests
 from lxml import etree as ET
+
+iiif_prezi3.config.configs["helpers.auto_fields.AutoLang"].auto_lang = "en"
 
 
 @dataclass
@@ -49,21 +52,12 @@ class Document:
     date: str
 
 
-def to_collection(
-    i,
-    base_url,
-    prefix="",
-    language="en",
-):
+def to_collection(i: Fonds | Series | FileGroup, base_url: str, prefix=""):
     collection_filename = f"{prefix}{i.code}.json"
     collection_filename = collection_filename.replace(" ", "+")
     collection_id = base_url + collection_filename
 
     dirname = os.path.dirname(collection_filename)
-    if dirname:
-        os.makedirs(dirname, exist_ok=True)
-
-    iiif_prezi3.config.configs["helpers.auto_fields.AutoLang"].auto_lang = language
 
     collection = iiif_prezi3.Collection(id=collection_id, label=f"{i.code} - {i.title}")
 
@@ -86,44 +80,50 @@ def to_collection(
             )
         )
 
+    at_least_one_file = False
     for c in i.hasPart:
         if isinstance(c, Series):
-            collection.add_item(
-                to_collection(
-                    c,
-                    base_url,
-                    prefix=collection_filename.replace(".json", "/"),
-                )
+            sub_part = to_collection(
+                c,
+                base_url,
+                prefix=collection_filename.replace(".json", "/"),
             )
+
         elif isinstance(c, FileGroup):
-            collection.add_item(
-                to_collection(
-                    c,
-                    base_url,
-                    prefix=collection_filename.replace(".json", "/"),
-                )
+            sub_part = to_collection(
+                c,
+                base_url,
+                prefix=collection_filename.replace(".json", "/"),
             )  # or manifest?
         elif isinstance(c, File):
-            collection.add_item(
-                to_manifest(
-                    c,
-                    base_url,
-                    prefix=collection_filename.replace(".json", "/"),
-                )
+            sub_part = to_manifest(
+                c,
+                base_url,
+                prefix=collection_filename.replace(".json", "/"),
             )
 
-    with open(collection_filename, "w") as outfile:
-        outfile.write(collection.json(indent=4))
+        # Recursively add sub-collections and manifests if there is at least one file
+        if sub_part:
+            at_least_one_file = True
+            collection.add_item(sub_part)
 
-    return collection
+    if at_least_one_file:
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+
+        with open(collection_filename, "w") as outfile:
+            outfile.write(collection.json(indent=2))
+
+        return collection
+    else:
+        return None
 
 
 def to_manifest(
-    i,
-    base_url,
+    i: File,
+    base_url: str,
     prefix="",
     license_uri="https://creativecommons.org/publicdomain/mark/1.0/",
-    language="en",
     fetch_from_url=False,
 ):
     manifest_filename = f"{prefix}{i.code}.json"
@@ -131,8 +131,6 @@ def to_manifest(
     manifest_id = base_url + manifest_filename
 
     os.makedirs(os.path.dirname(manifest_filename), exist_ok=True)
-
-    iiif_prezi3.config.configs["helpers.auto_fields.AutoLang"].auto_lang = language
 
     manifest = iiif_prezi3.Manifest(
         id=manifest_id,
@@ -214,23 +212,22 @@ def to_manifest(
             manifest.add_item(canvas)
 
     with open(manifest_filename, "w") as outfile:
-        outfile.write(manifest.json(indent=4))
+        outfile.write(manifest.json(indent=2))
 
     return manifest
 
 
-def get_scans(metsid, cache_path="data/gaf/"):
+def get_scans(metsid: str, cache_path="data/gaf/") -> list[tuple[str, str]]:
     NS = {"mets": "http://www.loc.gov/METS/"}
 
     scans = []
 
     if metsid:
-        url = "https://service.archief.nl/gaf/api/mets/v1/" + metsid
-
         if cache_path and metsid + ".xml" in os.listdir(cache_path):
-            print(f"Fetching {url} from cache")
+            print(f"Fetching {metsid} from cache")
             mets = ET.parse(os.path.join(cache_path, metsid + ".xml"))
         else:
+            url = "https://service.archief.nl/gaf/api/mets/v1/" + metsid
             print("Fetching", url)
             xml = requests.get(url).text
             mets = ET.fromstring(bytes(xml, encoding="utf-8"))
@@ -265,7 +262,7 @@ def get_scans(metsid, cache_path="data/gaf/"):
     return scans
 
 
-def parse_ead(ead_file_path: str):
+def parse_ead(ead_file_path: str, filter_codes: set = set()) -> Fonds:
     tree = ET.parse(ead_file_path)
 
     fonds_code = tree.find("eadheader/eadid").text
@@ -281,15 +278,19 @@ def parse_ead(ead_file_path: str):
 
     series_els = tree.findall(".//c[@level='series']")
     for series_el in series_els:
-        s = get_series(series_el)
+        s = get_series(series_el, filter_codes=filter_codes)
         fonds.hasPart.append(s)
 
     return fonds
 
 
-def get_series(series_el):
+def get_series(series_el, filter_codes: set = set()) -> Series:
     series_code_el = series_el.find("did/unitid[@type='series_code']")
     series_title = "".join(series_el.find("did/unittitle").itertext()).strip()
+
+    while "  " in series_title:  # double space
+        series_title = series_title.replace("  ", " ")
+
     if series_code_el is not None:
         series_code = series_code_el.text
         series_code = series_code.replace("/", "")
@@ -306,13 +307,13 @@ def get_series(series_el):
     file_and_filegrp_els = series_el.xpath("child::*")
     for el in file_and_filegrp_els:
         if el.get("level") == "file":
-            i = get_file(el)
+            i = get_file(el, filter_codes)
 
         elif el.get("otherlevel") == "filegrp":
-            i = get_filegrp(el)
+            i = get_filegrp(el, filter_codes)
 
         elif el.get("level") == "subseries":
-            i = get_series(el)
+            i = get_series(el, filter_codes)
         else:
             continue
 
@@ -322,7 +323,7 @@ def get_series(series_el):
     return s
 
 
-def get_filegrp(filegrp_el):
+def get_filegrp(filegrp_el, filter_codes: set = set()) -> FileGroup:
     filegrp_code = filegrp_el.find("did/unitid").text
 
     # Title
@@ -346,7 +347,7 @@ def get_filegrp(filegrp_el):
 
     file_els = filegrp_el.findall("c[@level='file']")
     for file_el in file_els:
-        f = get_file(file_el)
+        f = get_file(file_el, filter_codes)
 
         if f:
             filegrp.hasPart.append(f)
@@ -354,7 +355,7 @@ def get_filegrp(filegrp_el):
     return filegrp
 
 
-def get_file(file_el):
+def get_file(file_el, filter_codes: set = set()) -> File | None:
     did = file_el.find("did")
 
     # Inventory number
@@ -362,6 +363,10 @@ def get_file(file_el):
     if inventorynumber_el is not None:
         inventorynumber = inventorynumber_el.text
     else:
+        return None
+
+    # Filter on selection
+    if filter_codes and inventorynumber not in filter_codes:
         return None
 
     # URI
@@ -373,7 +378,7 @@ def get_file(file_el):
         title = title.replace("  ", " ")
 
     # Date
-    date_el = did.find("unitdate")
+    date_el = did.find("unittitle/unitdate")
     if date_el is not None:
         date = date_el.attrib.get("normal", date_el.attrib.get("text"))
     else:
@@ -401,6 +406,7 @@ def get_file(file_el):
 def main(
     ead_file_path: str,
     base_url: str,
+    filter_codes_path: str = "",
 ) -> None:
     """
     Generate IIIF Collections and Manifests from an EAD file.
@@ -415,8 +421,16 @@ def main(
         base_url (str): The base URL of the IIIF manifests and collections
     """
 
-    fonds = parse_ead(ead_file_path)
+    if filter_codes_path:
+        with open(filter_codes_path, "r") as infile:
+            globalise_selection = set(json.load(infile))
+    else:
+        globalise_selection = []
 
+    # Parse EAD, filter on relevant inventory numbers
+    fonds = parse_ead(ead_file_path, filter_codes=globalise_selection)
+
+    # Generate IIIF Collections and Manifests from hierarchy
     to_collection(fonds, base_url)
 
 
@@ -424,4 +438,5 @@ if __name__ == "__main__":
     main(
         ead_file_path="data/1.04.02.xml",
         base_url="https://globalise-huygens.github.io/iiif-manifests/",
+        filter_codes_path="data/globalise_htr_selection.json",
     )
