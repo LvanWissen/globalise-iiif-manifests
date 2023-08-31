@@ -162,3 +162,5 @@ cython_debug/
 # Generated files
 1.04.02/
 data/gaf/
+inventories/
+1.04.02.json

@@ -1,5 +1,6 @@
 import json
 import os
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 import iiif_prezi3
@@ -9,47 +10,44 @@ from lxml import etree as ET
 iiif_prezi3.config.configs["helpers.auto_fields.AutoLang"].auto_lang = "en"
 
 
-@dataclass
-class Fonds:
+@dataclass(kw_only=True)
+class Base:
     code: str
     title: str
-    uri: str
-    hasPart: list
 
 
-@dataclass
-class Series:
-    code: str
-    title: str
-    uri: str
-    hasPart: list
+@dataclass(kw_only=True)
+class Collection(Base):
+    hasPart: list = field(default_factory=list)
+
+    def files(self):
+        for i in self.hasPart:
+            if isinstance(i, File):
+                yield i
+            else:
+                yield from i.files()
 
 
-@dataclass
-class FileGroup:
-    code: str
-    title: str
-    date: str
-    hasPart: list
+@dataclass(kw_only=True)
+class Fonds(Collection):
     uri: str = field(default_factory=str)
 
 
-@dataclass
-class File:
-    code: str
-    title: str
+@dataclass(kw_only=True)
+class Series(Collection):
+    pass
+
+
+@dataclass(kw_only=True)
+class FileGroup(Collection):
+    date: str
+
+
+@dataclass(kw_only=True)
+class File(Base):
     uri: str
     date: str
     metsid: str
-    hasPart: list
-
-
-@dataclass
-class Document:
-    code: str
-    title: str
-    uri: str
-    date: str
 
 
 def to_collection(i: Fonds | Series | FileGroup, base_url: str, prefix=""):
@@ -120,50 +118,106 @@ def to_collection(i: Fonds | Series | FileGroup, base_url: str, prefix=""):
 
 
 def to_manifest(
-    i: File,
+    i: File | dict,
     base_url: str,
     prefix="",
     license_uri="https://creativecommons.org/publicdomain/mark/1.0/",
     fetch_from_url=False,
+    hwd_data: dict = None,
 ):
-    manifest_filename = f"{prefix}{i.code}.json"
-    manifest_filename = manifest_filename.replace(" ", "+")
-    manifest_id = base_url + manifest_filename
+    if isinstance(i, File):
+        manifest_filename = f"{prefix}{i.code}.json"
+        manifest_filename = manifest_filename.replace(" ", "+")
+        manifest_id = base_url + manifest_filename
 
-    os.makedirs(os.path.dirname(manifest_filename), exist_ok=True)
+        os.makedirs(os.path.dirname(manifest_filename), exist_ok=True)
 
-    manifest = iiif_prezi3.Manifest(
-        id=manifest_id,
-        label=f"{i.code} - {i.title}",
-        metadata=[
-            iiif_prezi3.KeyValueString(
-                label="Identifier",
-                value={"en": [i.code]},
-            ),
-            iiif_prezi3.KeyValueString(
-                label="Title",
-                value={"en": [i.title]},
-            ),
-            iiif_prezi3.KeyValueString(
-                label="Date",
-                value={"en": [i.date or "?"]},
-            ),
-            iiif_prezi3.KeyValueString(
-                label="Permalink",
-                value={"en": [f'<a href="{i.uri}">{i.uri}</a>']},
-            ),
-        ],
-        # seeAlso={"id": i.uri, "label": "Permalink"},
-        rights=license_uri,
-    )
-    scans = get_scans(i.metsid)
+        manifest = iiif_prezi3.Manifest(
+            id=manifest_id,
+            label=f"{i.code} - {i.title}",
+            metadata=[
+                iiif_prezi3.KeyValueString(
+                    label="Identifier",
+                    value={"en": [i.code]},
+                ),
+                iiif_prezi3.KeyValueString(
+                    label="Title",
+                    value={"en": [i.title]},
+                ),
+                iiif_prezi3.KeyValueString(
+                    label="Date",
+                    value={"en": [i.date or "?"]},
+                ),
+                iiif_prezi3.KeyValueString(
+                    label="Permalink",
+                    value={"en": [f'<a href="{i.uri}">{i.uri}</a>']},
+                ),
+            ],
+            # seeAlso={"id": i.uri, "label": "Permalink"},
+            rights=license_uri,
+        )
 
+        scans = get_scans(i.metsid)
+
+    elif isinstance(i, dict):
+        print("Making manifest for inventory", i["code"])
+        manifest_filename = f"{prefix}{i['code']}.json"
+        manifest_id = base_url + manifest_filename
+
+        os.makedirs(os.path.dirname(manifest_filename), exist_ok=True)
+
+        manifest = iiif_prezi3.Manifest(
+            id=manifest_id,
+            label=f"Inventory {i['code']}",
+            metadata=[
+                iiif_prezi3.KeyValueString(
+                    label="Identifier",
+                    value={"en": [i["code"]]},
+                ),
+                iiif_prezi3.KeyValueString(
+                    label="Titles",
+                    value={"en": [t if t else "?" for t in i["titles"]]},
+                ),
+                iiif_prezi3.KeyValueString(
+                    label="Dates",
+                    value={"en": [d if d else "?" for d in i["dates"]]},
+                ),
+                iiif_prezi3.KeyValueString(
+                    label="Permalink",
+                    value={
+                        "en": [
+                            f'<a href="{u}">{u}</a>' if u else "?" for u in i["uris"]
+                        ]
+                    },
+                ),
+            ],
+            # seeAlso={"id": i.uri, "label": "Permalink"},
+            rights=license_uri,
+        )
+
+        scans = get_scans(i["metsid"])
+    else:
+        raise TypeError("i should be a File or dict")
+
+    # Add scans
     for n, (file_name, iiif_service_info) in enumerate(scans, 1):
+        base_file_name = file_name.rsplit(".", 1)[0]
+        if hwd_data and base_file_name in hwd_data:
+            height = hwd_data[base_file_name].get("h", 100)
+            width = hwd_data[base_file_name].get("w", 100)
+        elif hwd_data:
+            print(f"Missing height and width for {base_file_name}")
+            height = 100
+            width = 100
+        else:
+            height = 100
+            width = 100
+
         if fetch_from_url:
             manifest.make_canvas_from_iiif(
                 url=iiif_service_info,
                 id=f"{manifest_id}/canvas/p{n}",
-                label=file_name,
+                label=base_file_name,
                 anno_id=f"{manifest_id}/canvas/p{n}/anno",
                 anno_page_id=f"{manifest_id}/canvas/p{n}/annotationpage",
             )
@@ -187,15 +241,15 @@ def to_manifest(
                 type="Image",
                 service=[service],
                 format="image/jpeg",
-                height=100,  # mock value for now
-                width=100,  # mock value for now
+                height=height,
+                width=width,
             )
 
             canvas = iiif_prezi3.Canvas(
                 id=canvas_id,
-                label=file_name,
-                height=100,  # mock value for now
-                width=100,  # mock value for now
+                label=base_file_name,
+                height=height,
+                width=width,
             )
             annotation = iiif_prezi3.Annotation(
                 id=anno_id,
@@ -224,11 +278,9 @@ def get_scans(metsid: str, cache_path="data/gaf/") -> list[tuple[str, str]]:
 
     if metsid:
         if cache_path and metsid + ".xml" in os.listdir(cache_path):
-            print(f"Fetching {metsid} from cache")
             mets = ET.parse(os.path.join(cache_path, metsid + ".xml"))
         else:
             url = "https://service.archief.nl/gaf/api/mets/v1/" + metsid
-            print("Fetching", url)
             xml = requests.get(url).text
             mets = ET.fromstring(bytes(xml, encoding="utf-8"))
 
@@ -273,7 +325,6 @@ def parse_ead(ead_file_path: str, filter_codes: set = set()) -> Fonds:
         code=fonds_code,
         title=fonds_title,
         uri=permalink,
-        hasPart=[],
     )
 
     series_els = tree.findall(".//c[@level='series']")
@@ -297,12 +348,7 @@ def get_series(series_el, filter_codes: set = set()) -> Series:
     else:
         series_code = series_title
 
-    s = Series(
-        code=series_code,
-        title=series_title,
-        uri="",
-        hasPart=[],
-    )
+    s = Series(code=series_code, title=series_title)
 
     file_and_filegrp_els = series_el.xpath("child::*")
     for el in file_and_filegrp_els:
@@ -342,7 +388,6 @@ def get_filegrp(filegrp_el, filter_codes: set = set()) -> FileGroup:
         code=filegrp_code,
         title=filegrp_title,
         date=date,
-        hasPart=[],
     )
 
     file_els = filegrp_el.findall("c[@level='file']")
@@ -373,7 +418,7 @@ def get_file(file_el, filter_codes: set = set()) -> File | None:
     permalink = did.find("unitid[@type='handle']").text
 
     # Title
-    title = "".join(did.find("unittitle").itertext())
+    title = "".join(did.find("unittitle").itertext()).strip()
     while "  " in title:  # double space
         title = title.replace("  ", " ")
 
@@ -397,7 +442,6 @@ def get_file(file_el, filter_codes: set = set()) -> File | None:
         uri=permalink,
         date=date,
         metsid=metsid,
-        hasPart=[],
     )
 
     return f
@@ -407,18 +451,19 @@ def main(
     ead_file_path: str,
     base_url: str,
     filter_codes_path: str = "",
+    hwd_data_path: str = "",
 ) -> None:
     """
     Generate IIIF Collections and Manifests from an EAD file.
 
-    The lowest level of these collections are manifests for each inventory.
-
     Args:
-        ead_file_path (str): File path to the EAD file of a specific archive
-        collection_number (str): The collection number of this archive
-        collection_label (str): The title of this archive
-        collection_permalink (str): The permalink of this archive (e.g. handle)
-        base_url (str): The base URL of the IIIF manifests and collections
+        ead_file_path (str): Path to the EAD file.
+        base_url (str): Base URL for the manifests.
+        filter_codes_path (str, optional): Path to a JSON file with a list of inventory numbers to include. Defaults to "".
+        hwd_data_path (str, optional): Path to a JSON file with the height and width of each scan. Defaults to "".
+
+    Returns:
+        None
     """
 
     if filter_codes_path:
@@ -427,16 +472,55 @@ def main(
     else:
         globalise_selection = []
 
+    if hwd_data_path:
+        if hwd_data_path.endswith(".gz"):
+            import gzip
+
+            with gzip.open(hwd_data_path, "r") as infile:
+                hwd_data = json.load(infile)
+        else:
+            with open(hwd_data_path, "r") as infile:
+                hwd_data = json.load(infile)
+    else:
+        hwd_data = None
+
     # Parse EAD, filter on relevant inventory numbers
     fonds = parse_ead(ead_file_path, filter_codes=globalise_selection)
 
+    data = defaultdict(lambda: defaultdict(list))
+    for f in fonds.files():
+        data[f.code]["titles"].append(f.title)
+        data[f.code]["dates"].append(f.date)
+        data[f.code]["uris"].append(f.uri)
+        data[f.code]["metsid"] = f.metsid
+
+    for code, metadata in data.items():
+        metadata["code"] = code
+        to_manifest(metadata, base_url, "inventories/", hwd_data=hwd_data)
+
+    {
+        "titles": [
+            "1610 dec. 20 - 1611 juli 13",
+            "1614 nov. 13 - 1615 nov. 5",
+            "Stukken betreffende de Molukken, Banda, Ambon, Bantam, Makassar en Gresik",
+        ],
+        "dates": ["1610-12-20/1611-07-13", "1614-11-13/1615-11-05", ""],
+        "uris": [
+            "http://hdl.handle.net/10648/fc013c7a-115e-42cf-8095-db734cbd97f4",
+            "http://hdl.handle.net/10648/05a7f301-10ba-47ef-ae63-ff4153b42f52",
+            "http://hdl.handle.net/10648/c7e21b00-8ab6-4ecb-b78c-f980ef7a9734",
+        ],
+        "metsids": "3c1644db-51e1-4f0d-8796-c7bb8bafc26f",
+    }
+
     # Generate IIIF Collections and Manifests from hierarchy
-    to_collection(fonds, base_url)
+    # to_collection(fonds, base_url)
 
 
 if __name__ == "__main__":
     main(
         ead_file_path="data/1.04.02.xml",
-        base_url="https://globalise-huygens.github.io/iiif-manifests/",
+        base_url="https://data.globalise.huygens.knaw.nl/manifests/",
         filter_codes_path="data/globalise_htr_selection.json",
+        hwd_data_path="data/1.04.02_hwd.json.gz",
     )
