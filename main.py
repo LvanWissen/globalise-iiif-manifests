@@ -7,7 +7,15 @@ import iiif_prezi3
 import requests
 from lxml import etree as ET
 
+from dotenv import load_dotenv
+
+
 iiif_prezi3.config.configs["helpers.auto_fields.AutoLang"].auto_lang = "en"
+
+# read from .env file
+load_dotenv()
+TEXTREPO_API_URL = os.getenv("TEXTREPO_API_URL", "")
+TEXTREPO_API_KEY = os.getenv("TEXTREPO_API_KEY", "")
 
 
 @dataclass(kw_only=True)
@@ -20,9 +28,11 @@ class Base:
 class Collection(Base):
     hasPart: list = field(default_factory=list)
 
-    def files(self):
+    def files(self, use_filegroup=False):
         for i in self.hasPart:
-            if isinstance(i, File):
+            if use_filegroup and isinstance(i, FileGroup):
+                yield i
+            elif isinstance(i, File):
                 yield i
             else:
                 yield from i.files()
@@ -166,9 +176,14 @@ def to_manifest(
 
         os.makedirs(os.path.dirname(manifest_filename), exist_ok=True)
 
+        if "inventories" in prefix:
+            label = f"Inventory {i['code']}"
+        else:
+            label = i["titles"][0]
+
         manifest = iiif_prezi3.Manifest(
             id=manifest_id,
-            label=f"Inventory {i['code']}",
+            label=label,
             metadata=[
                 iiif_prezi3.KeyValueString(
                     label="Identifier",
@@ -195,13 +210,20 @@ def to_manifest(
             rights=license_uri,
         )
 
-        scans = get_scans(i["metsid"])
+        if "scans" in i and i["scans"]:
+            scans = i["scans"]
+        else:
+            scans = get_scans(i["metsid"])
     else:
         raise TypeError("i should be a File or dict")
 
     # Add scans
     for n, (file_name, iiif_service_info) in enumerate(scans, 1):
-        base_file_name = file_name.rsplit(".", 1)[0]
+        if file_name.endswith((".tif", ".tiff", ".jpg", ".jpeg")):
+            base_file_name = file_name.rsplit(".", 1)[0]
+        else:
+            base_file_name = file_name
+
         if hwd_data and base_file_name in hwd_data:
             height = hwd_data[base_file_name].get("h", 100)
             width = hwd_data[base_file_name].get("w", 100)
@@ -447,9 +469,57 @@ def get_file(file_el, filter_codes: set = set()) -> File | None:
     return f
 
 
+def parse_csv(csv_file_path: str, sep=",", encoding="utf-8"):
+    import pandas as pd
+
+    df = pd.read_csv(csv_file_path, sep=sep, encoding=encoding)
+
+    # document_id	internal_id	title	year_creation_or_dispatch	inventory_number	folio_or_page	folio_or_page_range	scan_range	scan_start	scan_end	no_of_scans	no_of_pages	GM_id	remarks
+
+    data = defaultdict(lambda: defaultdict(list))
+    for _, d in df.iterrows():
+        data[d.document_id]["titles"].append(d.title)
+        data[d.document_id]["dates"].append(d.year_creation_or_dispatch)
+        # data[d.document_id]["uris"].append(f.uri)
+        # data[d.document_id]["metsid"] = f.metsid
+
+        filenames = []
+        scan_name, scan_name_start_index = d.scan_start.rsplit("_", 1)
+
+        scan_name = scan_name.split("/file/")[1]
+        scan_name_start_index = int(scan_name_start_index)
+
+        scan_name_end_index = scan_name_start_index + d.no_of_scans - 1  # inclusive
+
+        for i in range(scan_name_start_index, scan_name_end_index + 1):
+            filenames.append(f"{scan_name}_{str(i).zfill(4)}")
+
+        data[d.document_id]["scans"] = get_iiif_urls_from_textrepo(filenames)
+
+    return data
+
+
+def get_iiif_urls_from_textrepo(filesnames: list[str]) -> list[tuple[str, str]]:
+    from textrepo.client import TextRepoClient
+
+    client = TextRepoClient(base_uri=TEXTREPO_API_URL, api_key=TEXTREPO_API_KEY)
+
+    scans = []
+    for filename in filesnames:
+        document_metadata = client.find_document_metadata(external_id=filename)
+        scan_url = document_metadata["scan_url"]
+
+        service_info_url = scan_url.replace("/iip/", "/iipsrv?IIIF=/") + "/info.json"
+
+        scans.append((filename, service_info_url))
+
+    return scans
+
+
 def main(
-    ead_file_path: str,
-    base_url: str,
+    ead_file_path: str = "",
+    csv_file_path: str = "",
+    base_url: str = "https://example.org/",
     filter_codes_path: str = "",
     hwd_data_path: str = "",
 ) -> None:
@@ -484,43 +554,41 @@ def main(
     else:
         hwd_data = None
 
-    # Parse EAD, filter on relevant inventory numbers
-    fonds = parse_ead(ead_file_path, filter_codes=globalise_selection)
+    if ead_file_path:
+        # Parse EAD, filter on relevant inventory numbers
+        fonds = parse_ead(ead_file_path, filter_codes=globalise_selection)
 
-    data = defaultdict(lambda: defaultdict(list))
-    for f in fonds.files():
-        data[f.code]["titles"].append(f.title)
-        data[f.code]["dates"].append(f.date)
-        data[f.code]["uris"].append(f.uri)
-        data[f.code]["metsid"] = f.metsid
+        # Generate IIIF Collections and Manifests from hierarchy
+        # to_collection(fonds, base_url)
 
-    for code, metadata in data.items():
-        metadata["code"] = code
-        to_manifest(metadata, base_url, "inventories/", hwd_data=hwd_data)
+        # Generate IIIF Manifests from inventory numbers (unique)
+        data = defaultdict(lambda: defaultdict(list))
+        for f in fonds.files():
+            data[f.code]["titles"].append(f.title)
+            data[f.code]["dates"].append(f.date)
+            data[f.code]["uris"].append(f.uri)
+            data[f.code]["metsid"] = f.metsid
 
-    {
-        "titles": [
-            "1610 dec. 20 - 1611 juli 13",
-            "1614 nov. 13 - 1615 nov. 5",
-            "Stukken betreffende de Molukken, Banda, Ambon, Bantam, Makassar en Gresik",
-        ],
-        "dates": ["1610-12-20/1611-07-13", "1614-11-13/1615-11-05", ""],
-        "uris": [
-            "http://hdl.handle.net/10648/fc013c7a-115e-42cf-8095-db734cbd97f4",
-            "http://hdl.handle.net/10648/05a7f301-10ba-47ef-ae63-ff4153b42f52",
-            "http://hdl.handle.net/10648/c7e21b00-8ab6-4ecb-b78c-f980ef7a9734",
-        ],
-        "metsids": "3c1644db-51e1-4f0d-8796-c7bb8bafc26f",
-    }
+        for code, metadata in data.items():
+            metadata["code"] = code
+            to_manifest(metadata, base_url, "inventories/", hwd_data=hwd_data)
 
-    # Generate IIIF Collections and Manifests from hierarchy
-    # to_collection(fonds, base_url)
+    elif csv_file_path:
+        data = parse_csv(csv_file_path)
+
+        for code, metadata in data.items():
+            metadata["code"] = code
+            to_manifest(metadata, base_url, "documents/", hwd_data=hwd_data)
+
+    else:
+        raise ValueError("Either ead_file_path or csv_file_path should be given")
 
 
 if __name__ == "__main__":
     main(
-        ead_file_path="data/1.04.02.xml",
+        # ead_file_path="data/1.04.02.xml",
+        csv_file_path="data/document_metadata_july_2023.csv",
         base_url="https://data.globalise.huygens.knaw.nl/manifests/",
-        filter_codes_path="data/globalise_htr_selection.json",
-        hwd_data_path="data/1.04.02_hwd.json.gz",
+        # filter_codes_path="data/globalise_htr_selection.json",
+        # hwd_data_path="data/1.04.02_hwd.json.gz",
     )
