@@ -225,12 +225,11 @@ def to_manifest(
             base_file_name = file_name
 
         if hwd_data and base_file_name in hwd_data:
-            height = hwd_data[base_file_name].get("h", 100)
-            width = hwd_data[base_file_name].get("w", 100)
+            height = hwd_data[base_file_name]["h"]
+            width = hwd_data[base_file_name]["w"]
         elif hwd_data:
             print(f"Missing height and width for {base_file_name}")
-            height = 100
-            width = 100
+            fetch_from_url = True
         else:
             height = 100
             width = 100
@@ -585,6 +584,16 @@ def main(
 
 
 if __name__ == "__main__":
+    # Inventories
+    main(
+        ead_file_path="data/1.04.02.xml",
+        # csv_file_path="data/document_metadata_july_2023.csv",
+        base_url="https://data.globalise.huygens.knaw.nl/manifests/",
+        filter_codes_path="data/globalise_htr_selection.json",
+        hwd_data_path="data/1.04.02_hwd.json.gz",
+    )
+
+    # Documents
     main(
         # ead_file_path="data/1.04.02.xml",
         csv_file_path="data/document_metadata_july_2023.csv",
