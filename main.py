@@ -174,6 +174,10 @@ def to_manifest(
         manifest_filename = f"{prefix}{i['code']}.json"
         manifest_id = base_url + manifest_filename
 
+        # If file already exists, skip
+        # if os.path.exists(manifest_filename):
+        #     return
+
         os.makedirs(os.path.dirname(manifest_filename), exist_ok=True)
 
         if "inventories" in prefix:
@@ -235,14 +239,20 @@ def to_manifest(
             width = 100
 
         if fetch_from_url:
-            manifest.make_canvas_from_iiif(
-                url=iiif_service_info,
-                id=f"{manifest_id}/canvas/p{n}",
-                label=base_file_name,
-                anno_id=f"{manifest_id}/canvas/p{n}/anno",
-                anno_page_id=f"{manifest_id}/canvas/p{n}/annotationpage",
-            )
-        else:
+            try:
+                manifest.make_canvas_from_iiif(
+                    url=iiif_service_info,
+                    id=f"{manifest_id}/canvas/p{n}",
+                    label=base_file_name,
+                    anno_id=f"{manifest_id}/canvas/p{n}/anno",
+                    anno_page_id=f"{manifest_id}/canvas/p{n}/annotationpage",
+                )
+            except:
+                fetch_from_url = False
+                height = 100
+                width = 100
+
+        if not fetch_from_url:
             canvas_id = f"{manifest_id}/canvas/p{n}"
 
             service_id = iiif_service_info.replace("/info.json", "")
@@ -371,6 +381,15 @@ def get_series(series_el, filter_codes: set = set()) -> Series:
 
     s = Series(code=series_code, title=series_title)
 
+    parts = get_file_and_filegrp_els(series_el, filter_codes=filter_codes)
+    s.hasPart += parts
+
+    return s
+
+
+def get_file_and_filegrp_els(series_el, filter_codes: set = set()):
+    parts = []
+
     file_and_filegrp_els = series_el.xpath("child::*")
     for el in file_and_filegrp_els:
         if el.get("level") == "file":
@@ -385,9 +404,9 @@ def get_series(series_el, filter_codes: set = set()) -> Series:
             continue
 
         if i:
-            s.hasPart.append(i)
+            parts.append(i)
 
-    return s
+    return parts
 
 
 def get_filegrp(filegrp_el, filter_codes: set = set()) -> FileGroup:
@@ -411,12 +430,8 @@ def get_filegrp(filegrp_el, filter_codes: set = set()) -> FileGroup:
         date=date,
     )
 
-    file_els = filegrp_el.findall("c[@level='file']")
-    for file_el in file_els:
-        f = get_file(file_el, filter_codes)
-
-        if f:
-            filegrp.hasPart.append(f)
+    parts = get_file_and_filegrp_els(filegrp_el, filter_codes=filter_codes)
+    filegrp.hasPart += parts
 
     return filegrp
 
