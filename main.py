@@ -27,6 +27,7 @@ class Base:
 @dataclass(kw_only=True)
 class Collection(Base):
     hasPart: list = field(default_factory=list)
+    uri: str = field(default_factory=str)
 
     def files(self, use_filegroup=False):
         for i in self.hasPart:
@@ -40,7 +41,7 @@ class Collection(Base):
 
 @dataclass(kw_only=True)
 class Fonds(Collection):
-    uri: str = field(default_factory=str)
+    pass
 
 
 @dataclass(kw_only=True)
@@ -60,7 +61,9 @@ class File(Base):
     metsid: str
 
 
-def to_collection(i: Fonds | Series | FileGroup, base_url: str, prefix=""):
+def to_collection(
+    i: Fonds | Series | FileGroup, base_url: str, prefix="", base_url_manifests=""
+):
     collection_filename = f"{prefix}{i.code}.json"
     collection_filename = collection_filename.replace(" ", "+")
     collection_id = base_url + collection_filename
@@ -95,6 +98,7 @@ def to_collection(i: Fonds | Series | FileGroup, base_url: str, prefix=""):
                 c,
                 base_url,
                 prefix=collection_filename.replace(".json", "/"),
+                base_url_manifests=base_url_manifests,
             )
 
         elif isinstance(c, FileGroup):
@@ -102,13 +106,21 @@ def to_collection(i: Fonds | Series | FileGroup, base_url: str, prefix=""):
                 c,
                 base_url,
                 prefix=collection_filename.replace(".json", "/"),
+                base_url_manifests=base_url_manifests,
             )  # or manifest?
         elif isinstance(c, File):
-            sub_part = to_manifest(
-                c,
-                base_url,
-                prefix=collection_filename.replace(".json", "/"),
-            )
+            if base_url_manifests:
+                sub_part = to_manifest(
+                    c,
+                    base_url_manifests,
+                    prefix="inventories/",
+                )
+            else:
+                sub_part = to_manifest(
+                    c,
+                    base_url,
+                    prefix=collection_filename.replace(".json", "/"),
+                )
 
         # Recursively add sub-collections and manifests if there is at least one file
         if sub_part:
@@ -139,6 +151,15 @@ def to_manifest(
         manifest_filename = f"{prefix}{i.code}.json"
         manifest_filename = manifest_filename.replace(" ", "+")
         manifest_id = base_url + manifest_filename
+
+        # If file already exists, skip
+        if os.path.exists(manifest_filename):
+            # return Reference (shallow) only
+            return iiif_prezi3.Reference(
+                id=manifest_id,
+                label=f"{i.code} - {i.title}",
+                type="Manifest",
+            )
 
         os.makedirs(os.path.dirname(manifest_filename), exist_ok=True)
 
@@ -175,8 +196,8 @@ def to_manifest(
         manifest_id = base_url + manifest_filename
 
         # If file already exists, skip
-        # if os.path.exists(manifest_filename):
-        #     return
+        if os.path.exists(manifest_filename):
+            return
 
         os.makedirs(os.path.dirname(manifest_filename), exist_ok=True)
 
@@ -375,7 +396,7 @@ def get_series(series_el, filter_codes: set = set()) -> Series:
 
     if series_code_el is not None:
         series_code = series_code_el.text
-        series_code = series_code.replace("/", "")
+        series_code = series_code.replace("/", "-")
     else:
         series_code = series_title
 
@@ -533,7 +554,8 @@ def get_iiif_urls_from_textrepo(filesnames: list[str]) -> list[tuple[str, str]]:
 def main(
     ead_file_path: str = "",
     csv_file_path: str = "",
-    base_url: str = "https://example.org/",
+    base_url_collections: str = "https://example.org/",
+    base_url_manifests: str = "https://example.org/",
     filter_codes_path: str = "",
     hwd_data_path: str = "",
 ) -> None:
@@ -572,9 +594,6 @@ def main(
         # Parse EAD, filter on relevant inventory numbers
         fonds = parse_ead(ead_file_path, filter_codes=globalise_selection)
 
-        # Generate IIIF Collections and Manifests from hierarchy
-        # to_collection(fonds, base_url)
-
         # Generate IIIF Manifests from inventory numbers (unique)
         data = defaultdict(lambda: defaultdict(list))
         for f in fonds.files():
@@ -585,14 +604,19 @@ def main(
 
         for code, metadata in data.items():
             metadata["code"] = code
-            to_manifest(metadata, base_url, "inventories/", hwd_data=hwd_data)
+            to_manifest(metadata, base_url_manifests, "inventories/", hwd_data=hwd_data)
+
+        # Generate IIIF Collections and Manifests from hierarchy
+        to_collection(
+            fonds, base_url_collections, base_url_manifests=base_url_manifests
+        )
 
     elif csv_file_path:
         data = parse_csv(csv_file_path)
 
         for code, metadata in data.items():
             metadata["code"] = code
-            to_manifest(metadata, base_url, "documents/", hwd_data=hwd_data)
+            to_manifest(metadata, base_url_manifests, "documents/", hwd_data=hwd_data)
 
     else:
         raise ValueError("Either ead_file_path or csv_file_path should be given")
@@ -603,7 +627,8 @@ if __name__ == "__main__":
     main(
         ead_file_path="data/1.04.02.xml",
         # csv_file_path="data/document_metadata_july_2023.csv",
-        base_url="https://data.globalise.huygens.knaw.nl/manifests/",
+        base_url_manifests="https://data.globalise.huygens.knaw.nl/manifests/",
+        base_url_collections="https://data.globalise.huygens.knaw.nl/collections/",
         filter_codes_path="data/globalise_htr_selection.json",
         hwd_data_path="data/1.04.02_hwd.json.gz",
     )
@@ -612,7 +637,7 @@ if __name__ == "__main__":
     main(
         # ead_file_path="data/1.04.02.xml",
         csv_file_path="data/document_metadata_july_2023.csv",
-        base_url="https://data.globalise.huygens.knaw.nl/manifests/",
+        base_url_manifests="https://data.globalise.huygens.knaw.nl/manifests/",
         # filter_codes_path="data/globalise_htr_selection.json",
         # hwd_data_path="data/1.04.02_hwd.json.gz",
     )
